@@ -1,0 +1,93 @@
+import os
+import torch
+import numpy as np
+from PIL import Image
+from torch.utils.data import Dataset
+from transformers import (
+    SegformerFeatureExtractor,
+    SegformerForSemanticSegmentation,
+    TrainingArguments,
+    Trainer
+)
+
+# 클래스 정의 (3개 클래스)
+id2label = {0: "Background", 1: "Driving Area", 2: "Parking Area"}
+label2id = {v: k for k, v in id2label.items()}
+
+# Feature Extractor 설정
+feature_extractor = SegformerFeatureExtractor(do_reduce_labels=False)
+
+# Dataset 클래스 정의
+class SegFormerDataset(Dataset):
+    def __init__(self, image_dir, mask_dir, feature_extractor):
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.feature_extractor = feature_extractor
+        self.images = sorted([
+            f for f in os.listdir(image_dir) if f.endswith(('.jpg', '.png'))
+        ])
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.image_dir, self.images[idx])
+        mask_path = os.path.join(self.mask_dir, os.path.splitext(self.images[idx])[0] + ".png")
+
+        image = Image.open(img_path).convert("RGB")
+        mask = np.array(Image.open(mask_path), dtype=np.uint8)
+
+        inputs = feature_extractor(images=image, return_tensors="pt")
+        inputs["labels"] = torch.tensor(mask, dtype=torch.long)
+
+        return {k: v.squeeze() for k, v in inputs.items()}
+
+# 데이터셋 경로
+train_dataset = SegFormerDataset(
+    image_dir="/home/elicer/dataset/images/train",
+    mask_dir="/home/elicer/dataset/masks/train",
+    feature_extractor=feature_extractor
+)
+
+val_dataset = SegFormerDataset(
+    image_dir="/home/elicer/dataset/images/val",
+    mask_dir="/home/elicer/dataset/masks/val",
+    feature_extractor=feature_extractor
+)
+
+# 기존 모델 이어서 불러오기
+model = SegformerForSemanticSegmentation.from_pretrained(
+    "/home/elicer/jny/result/segformer-b2/checkpoint-2300",
+    num_labels=3,
+    id2label=id2label,
+    label2id=label2id,
+    ignore_mismatched_sizes=True
+)
+model.config.ignore_index = 255
+
+# 학습 인자 설정
+training_args = TrainingArguments(
+    output_dir="/home/elicer/jny/result/segformer-b2/finetuned",
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=2,
+    num_train_epochs=5,
+    learning_rate=5e-5,
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    logging_steps=50,
+    save_total_limit=2,
+    fp16=True,
+    remove_unused_columns=True,
+    report_to="none"
+)
+
+# Trainer 정의 및 학습 시작
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
+)
+
+trainer.train()
+print("\n✅ Fine-tuning 완료")
